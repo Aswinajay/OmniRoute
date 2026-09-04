@@ -165,7 +165,7 @@ export default function Modal({
         aria-labelledby={title ? titleId : undefined}
         className={cn(
           "relative w-full glass-card",
-          "rounded-3xl shadow-2xl",
+          "rounded-card shadow-2xl",
           "animate-in fade-in zoom-in-95 duration-200",
           sizes[size],
           className

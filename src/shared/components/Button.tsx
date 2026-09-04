@@ -25,9 +25,9 @@ const variants = {
 export type ButtonVariant = keyof typeof variants;
 
 const sizes = {
-  sm: "h-7 px-3 text-xs rounded-xl",
-  md: "h-9 px-4 text-sm rounded-xl",
-  lg: "h-11 px-6 text-sm rounded-xl",
+  sm: "h-7 px-3 text-xs rounded-control",
+  md: "h-9 px-4 text-sm rounded-control",
+  lg: "h-11 px-6 text-sm rounded-control",
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {

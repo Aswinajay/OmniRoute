@@ -22,16 +22,36 @@ import {
   isReservedProviderPrefix,
   reservedProviderPrefixMessage,
 } from "@/shared/constants/reservedProviderPrefixes";
-
+import {
+  isValidIanaTimeZone,
+  isValidResetHour,
+} from "@omniroute/open-sse/services/dailyQuotaReset.ts";
 import {
   upstreamHeadersRecordSchema,
   modelCompatPerProtocolSchema,
   customHeadersSchema,
 } from "./misc.ts";
+import { isValidProviderIconUrl } from "@/shared/validation/iconUrl";
 
 export { validateProviderSpecificData };
 
-import { isValidProviderIconUrl } from "@/shared/validation/iconUrl";
+const dailyQuotaResetTimezoneSchema = z
+  .string()
+  .trim()
+  .optional()
+  .or(z.literal(""))
+  .refine((value) => !value || isValidIanaTimeZone(value), {
+    message: "Unknown IANA timezone",
+  });
+
+const dailyQuotaResetHourSchema = z
+  .number()
+  .int()
+  .optional()
+  .nullable()
+  .refine((value) => value == null || isValidResetHour(value), {
+    message: "Hour must be 0-23",
+  });
 
 // ──── Provider Schemas ────
 
@@ -48,7 +68,7 @@ const providerNodeIconUrlSchema = z
   .optional();
 
 // #6715: the `apiKey` field is reused as the raw `Cookie:` header value for
-// cookie-based web providers (Gemini Business, Copilot M365, ChatGPT Web,
+// cookie-based web providers (Gemini Business, Copilot M365, ChatGPT Web (Codex),
 // Claude Web, …). Real multi-cookie session headers (many `__Secure-*` entries,
 // large session tokens) legitimately exceed the old 10,000-char cap, so saving
 // a cookie that the provider's own `validate` check (validateProviderApiKeySchema,
@@ -271,6 +291,7 @@ export const providerModelMutationSchema = z.object({
   // the same flag flows through `getCustomVisionCapabilityFields()` in the /v1/models
   // catalog. `null` clears a manual override back to the id-based heuristic.
   supportsVision: z.boolean().nullable().optional(),
+  isFree: z.boolean().nullable().optional(),
   normalizeToolCallId: z.boolean().optional(),
   preserveOpenAIDeveloperRole: z.boolean().nullable().optional(),
   upstreamHeaders: upstreamHeadersRecordSchema.nullable().optional(),
@@ -336,9 +357,22 @@ export const createProviderNodeSchema = z
     // isValidProviderIconUrl (2000 chars for http(s), 256 KiB for data:image).
     iconUrl: providerNodeIconUrlSchema,
     customHeaders: customHeadersSchema,
+    dailyQuotaResetTimezone: dailyQuotaResetTimezoneSchema,
+    dailyQuotaResetHour: dailyQuotaResetHourSchema,
   })
   .superRefine((value, ctx) => {
     const nodeType = value.type || "openai-compatible";
+    const normalizedPrefix = value.prefix?.trim();
+    if (normalizedPrefix && isReservedProviderPrefix(normalizedPrefix)) {
+      // Validate caller-supplied prefixes before preset handling. Presets may
+      // provide a default, but the route preserves an explicit prefix; an early
+      // return here used to let retired identities create unreachable nodes.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: reservedProviderPrefixMessage(normalizedPrefix),
+        path: ["prefix"],
+      });
+    }
     if (value.preset === "vibeproxy-openai") {
       // Preset supplies name/prefix/apiType — but baseUrl is still mandatory
       // (a local proxy's host/port is operator-specific, unlike the generic
@@ -407,6 +441,8 @@ export const updateProviderNodeSchema = z
     // clears a previously stored custom icon.
     iconUrl: providerNodeIconUrlSchema,
     customHeaders: customHeadersSchema,
+    dailyQuotaResetTimezone: dailyQuotaResetTimezoneSchema,
+    dailyQuotaResetHour: dailyQuotaResetHourSchema,
   })
   .superRefine((value, ctx) => {
     // Reserved-prefix guard (tokenrouter bug) — same rationale as the guard in
@@ -483,7 +519,9 @@ export const updateProviderConnectionSchema = z
     errorCode: z.union([z.string(), z.null()]).optional(),
     rateLimitedUntil: z.union([z.string(), z.null()]).optional(),
     lastTested: z.union([z.string(), z.null()]).optional(),
-    healthCheckInterval: z.coerce.number().int().min(0).optional(),
+    healthCheckInterval: z
+      .union([z.null(), z.coerce.number().int().min(0).max(1440)])
+      .optional(),
     group: z.union([z.string().max(100), z.null()]).optional(),
     maxConcurrent: z.union([z.null(), z.coerce.number().int().min(0)]).optional(),
     // Per-window quota cutoffs. Map keys are window names (e.g. "window5h",
@@ -516,6 +554,7 @@ export const updateProviderConnectionSchema = z
     rateLimitOverrides: z
       .object({
         rpm: rateLimitOverrideNumber(1_000_000).optional(),
+        rpd: rateLimitOverrideNumber(10_000_000).optional(),
         tpm: rateLimitOverrideNumber(100_000_000).optional(),
         tpd: rateLimitOverrideNumber(10_000_000_000).optional(),
         minTime: rateLimitOverrideNumber(60_000).optional(),

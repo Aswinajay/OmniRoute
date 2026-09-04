@@ -2,7 +2,7 @@
 
 import { useTranslations } from "next-intl";
 
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { CardSkeleton, Button, Modal } from "@/shared/components";
@@ -20,91 +20,24 @@ import { useIsElectron, useOpenExternal } from "@/shared/hooks/useElectron";
 import { HomeProviderTopologySection } from "./HomeProviderTopologySection";
 import { shouldShowProviderTopologyOnHome } from "./homeAppearance";
 import HomeRecentRequests from "../home/HomeRecentRequests";
-
-type UpdateStep = {
-  step: string;
-  status: string;
-  message: string;
-};
-
-type VersionInfo = {
-  current: string;
-  latest: string;
-  updateAvailable: boolean;
-  channel: string;
-  autoUpdateSupported: boolean;
-  autoUpdateError?: string | null;
-};
-
-type HomePageClientProps = {
-  machineId?: string;
-};
-
-type ProviderSummaryItem = {
-  id: string;
-  provider: {
-    id: string;
-    name: string;
-    color?: string;
-    textIcon?: string;
-    alias?: string;
-  };
-  total: number;
-  connected: number;
-  errors: number;
-  modelCount: number;
-  authType: "free" | "oauth" | "apikey" | string;
-};
-
-type ProviderMetricSummary = {
-  totalRequests?: number;
-  totalSuccesses?: number;
-  successRate?: number;
-  avgLatencyMs?: number;
-  lastRequestAt?: string | null;
-  lastErrorAt?: string | null;
-  lastStatus?: number | null;
-  lastErrorStatus?: number | null;
-};
-
-type ProviderModelSummary = {
-  fullModel: string;
-  alias?: string;
-  model?: string;
-};
-
-const PROVIDER_ALIAS_TO_ID = new Map(
-  Object.entries(AI_PROVIDERS)
-    .flatMap(([providerId, providerInfo]) =>
-      providerInfo.alias ? [[providerInfo.alias.toLowerCase(), providerId]] : []
-    )
-    .filter((entry): entry is [string, string] => entry.length === 2)
-);
-
-function normalizeProviderId(providerId?: string | null): string {
-  const normalized = typeof providerId === "string" ? providerId.trim().toLowerCase() : "";
-  if (!normalized) return "";
-  return AI_PROVIDERS[normalized] ? normalized : PROVIDER_ALIAS_TO_ID.get(normalized) || normalized;
-}
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function mergeUpdateStep(steps: UpdateStep[], nextStep: UpdateStep) {
-  const idx = steps.findIndex((step) => step.step === nextStep.step);
-  if (idx === -1) {
-    return [...steps, nextStep];
-  }
-
-  const next = [...steps];
-  next[idx] = nextStep;
-  return next;
-}
-
-// Quick-start link classes, extracted so each <Link> still fits on one line with
-// prefetch={false} (#8281) — this file is size-frozen.
-const INLINE_LINK = "text-primary hover:underline";
-const DOCS_LINK =
-  "hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-border text-text-muted hover:text-text-main hover:bg-bg-subtle transition-colors";
+import {
+  type UpdateStep,
+  type VersionInfo,
+  type HomePageClientProps,
+  type ProviderSummaryItem,
+  type ProviderMetricSummary,
+  type ProviderModelSummary,
+  normalizeProviderId,
+  wait,
+  mergeUpdateStep,
+  INLINE_LINK,
+  DOCS_LINK,
+  BENTO_CARD,
+  BENTO_ICON,
+  BENTO_TITLE,
+  BENTO_DESC,
+  emptySubscribe,
+} from "./homePageClientUtils";
 
 export default function HomePageClient({ machineId }: HomePageClientProps) {
   const router = useRouter();
@@ -115,7 +48,13 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
   const [providerConnections, setProviderConnections] = useState([]);
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [baseUrl, setBaseUrl] = useState("/v1");
+  // useSyncExternalStore keeps SSR/hydration consistent ("/v1" on the server,
+  // the real origin after hydration) without a setState-in-effect round-trip.
+  const baseUrl = useSyncExternalStore(
+    emptySubscribe,
+    () => `${globalThis.location.origin}/v1`,
+    () => "/v1"
+  );
   const [selectedProvider, setSelectedProvider] = useState(null);
   const [providerMetrics, setProviderMetrics] = useState<Record<string, ProviderMetricSummary>>({});
   const [providerTopology, setProviderTopology] = useState({ lastProvider: "", errorProvider: "" });
@@ -135,36 +74,39 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
   // Platform detection and download links for Electron
   const platform =
     typeof globalThis.window === "undefined" ? undefined : globalThis.window.electronAPI?.platform;
+  // Destructured to locals: `versionInfo?.current` in a dependency array trips
+  // the lint heuristic that treats any `.current` access as a mutable ref read.
+  const installedVersion = versionInfo?.current || "";
+  const latestVersion = versionInfo?.latest || "";
   const electronDownload = useMemo(() => {
-    const latest = versionInfo?.latest || "";
-    const cleanLatest = latest.replace(/^v/, "");
+    const cleanLatest = latestVersion.replace(/^v/, "");
     if (platform === "darwin") {
       return {
         label: t("downloadDmg"),
         url: `https://github.com/diegosouzapw/OmniRoute/releases/download/v${cleanLatest}/OmniRoute-${cleanLatest}.dmg`,
-        desc: t("downloadDmgDescription", { version: versionInfo?.current || "" }),
+        desc: t("downloadDmgDescription", { version: installedVersion }),
       };
     }
     if (platform === "win32") {
       return {
         label: t("downloadExe"),
         url: `https://github.com/diegosouzapw/OmniRoute/releases/download/v${cleanLatest}/OmniRoute.Setup.${cleanLatest}.exe`,
-        desc: t("downloadExeDescription", { version: versionInfo?.current || "" }),
+        desc: t("downloadExeDescription", { version: installedVersion }),
       };
     }
     if (platform === "linux") {
       return {
         label: t("downloadAppImage"),
         url: `https://github.com/diegosouzapw/OmniRoute/releases/download/v${cleanLatest}/OmniRoute-${cleanLatest}.AppImage`,
-        desc: t("downloadAppImageDescription", { version: versionInfo?.current || "" }),
+        desc: t("downloadAppImageDescription", { version: installedVersion }),
       };
     }
     return {
       label: t("downloadUpdate"),
       url: `https://github.com/diegosouzapw/OmniRoute/releases/tag/v${cleanLatest}`,
-      desc: t("downloadUpdateDescription", { version: versionInfo?.current || "" }),
+      desc: t("downloadUpdateDescription", { version: installedVersion }),
     };
-  }, [platform, t, versionInfo?.latest, versionInfo?.current]);
+  }, [platform, t, latestVersion, installedVersion]);
 
   // Electron internal auto-updater state and listeners
   const [electronUpdateStatus, setElectronUpdateStatus] = useState<{
@@ -234,12 +176,6 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
       });
   }, []);
 
-  useEffect(() => {
-    if (typeof globalThis.window !== "undefined") {
-      setBaseUrl(`${globalThis.location.origin}/v1`);
-    }
-  }, []);
-
   const fetchData = useCallback(async () => {
     try {
       const [provRes, modelsRes, versionRes] = await Promise.all([
@@ -267,7 +203,9 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
   }, []);
 
   useEffect(() => {
-    fetchData();
+    void (async () => {
+      await fetchData();
+    })();
   }, [fetchData]);
 
   // Fetch provider nodes for display labels (compat providers)
@@ -1057,15 +995,13 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
             </div>
 
             <ol className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <li className="rounded-[18px] bg-[#F5F5F7] dark:bg-white/[0.04] border border-black/[0.06] dark:border-white/10 p-6 flex gap-4">
-                <div className="flex items-center justify-center size-10 rounded-2xl bg-primary/10 text-primary shrink-0 border border-black/5 dark:border-white/10">
+              <li className={BENTO_CARD}>
+                <div className={`${BENTO_ICON} bg-primary/10 text-primary`}>
                   <span className="material-symbols-outlined text-[18px]">key</span>
                 </div>
                 <div>
-                  <span className="text-[15px] font-semibold tracking-tight text-[#1D1D1F] dark:text-text-main">
-                    {t("step1Title")}
-                  </span>
-                  <p className="text-[13px] leading-relaxed text-text-muted mt-1">
+                  <span className={BENTO_TITLE}>{t("step1Title")}</span>
+                  <p className={BENTO_DESC}>
                     {t.rich("step1Desc", {
                       endpoint: (chunks) => (
                         <Link
@@ -1080,15 +1016,13 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
                   </p>
                 </div>
               </li>
-              <li className="rounded-[18px] bg-[#F5F5F7] dark:bg-white/[0.04] border border-black/[0.06] dark:border-white/10 p-6 flex gap-4">
-                <div className="flex items-center justify-center size-10 rounded-2xl bg-green-500/10 text-green-500 shrink-0 border border-black/5 dark:border-white/10">
+              <li className={BENTO_CARD}>
+                <div className={`${BENTO_ICON} bg-green-500/10 text-green-500`}>
                   <span className="material-symbols-outlined text-[18px]">dns</span>
                 </div>
                 <div>
-                  <span className="text-[15px] font-semibold tracking-tight text-[#1D1D1F] dark:text-text-main">
-                    {t("step2Title")}
-                  </span>
-                  <p className="text-[13px] leading-relaxed text-text-muted mt-1">
+                  <span className={BENTO_TITLE}>{t("step2Title")}</span>
+                  <p className={BENTO_DESC}>
                     {t.rich("step2Desc", {
                       providers: (chunks) => (
                         <Link href="/dashboard/providers" prefetch={false} className={INLINE_LINK}>
@@ -1099,28 +1033,22 @@ export default function HomePageClient({ machineId }: HomePageClientProps) {
                   </p>
                 </div>
               </li>
-              <li className="rounded-[18px] bg-[#F5F5F7] dark:bg-white/[0.04] border border-black/[0.06] dark:border-white/10 p-6 flex gap-4">
-                <div className="flex items-center justify-center size-10 rounded-2xl bg-blue-500/10 text-blue-500 shrink-0 border border-black/5 dark:border-white/10">
+              <li className={BENTO_CARD}>
+                <div className={`${BENTO_ICON} bg-blue-500/10 text-blue-500`}>
                   <span className="material-symbols-outlined text-[18px]">link</span>
                 </div>
                 <div>
-                  <span className="text-[15px] font-semibold tracking-tight text-[#1D1D1F] dark:text-text-main">
-                    {t("step3Title")}
-                  </span>
-                  <p className="text-[13px] leading-relaxed text-text-muted mt-1">
-                    {t("step3Desc", { url: currentEndpoint })}
-                  </p>
+                  <span className={BENTO_TITLE}>{t("step3Title")}</span>
+                  <p className={BENTO_DESC}>{t("step3Desc", { url: currentEndpoint })}</p>
                 </div>
               </li>
-              <li className="rounded-[18px] bg-[#F5F5F7] dark:bg-white/[0.04] border border-black/[0.06] dark:border-white/10 p-6 flex gap-4">
-                <div className="flex items-center justify-center size-10 rounded-2xl bg-amber-500/10 text-amber-500 shrink-0 border border-black/5 dark:border-white/10">
+              <li className={BENTO_CARD}>
+                <div className={`${BENTO_ICON} bg-amber-500/10 text-amber-500`}>
                   <span className="material-symbols-outlined text-[18px]">analytics</span>
                 </div>
                 <div>
-                  <span className="text-[15px] font-semibold tracking-tight text-[#1D1D1F] dark:text-text-main">
-                    {t("step4Title")}
-                  </span>
-                  <p className="text-[13px] leading-relaxed text-text-muted mt-1">
+                  <span className={BENTO_TITLE}>{t("step4Title")}</span>
+                  <p className={BENTO_DESC}>
                     {t.rich("step4Desc", {
                       logs: (chunks) => (
                         <Link href="/dashboard/logs" prefetch={false} className={INLINE_LINK}>

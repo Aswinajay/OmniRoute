@@ -38,7 +38,7 @@ export default function Card({
     <div
       className={cn(
         "glass-card",
-        "rounded-2xl shadow-sm",
+        "rounded-card border border-border shadow-sm",
         hover &&
           "hover:shadow-md hover:border-primary/35 hover:-translate-y-0.5 transition-all duration-200 cursor-pointer",
         paddings[padding],
@@ -50,7 +50,7 @@ export default function Card({
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             {icon && (
-              <div className="p-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.05] border border-black/5 dark:border-white/10 text-text-muted shadow-xs">
+              <div className="p-2 rounded-xl bg-black/[0.03] dark:bg-white/[0.05] border border-border text-text-muted shadow-xs">
                 <span className="material-symbols-outlined text-[20px]">{icon}</span>
               </div>
             )}

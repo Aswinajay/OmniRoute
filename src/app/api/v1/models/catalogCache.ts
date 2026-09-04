@@ -80,7 +80,7 @@ export type BackgroundRefreshScheduler = (task: () => Promise<unknown>) => void;
  * so fall back to the macrotask there. Those callers have no response being flushed, so
  * the deferral is all they ever needed.
  */
-function defaultBackgroundRefreshScheduler(task: () => Promise<unknown>): void {
+export function defaultBackgroundRefreshScheduler(task: () => Promise<unknown>): void {
   try {
     after(task);
   } catch {
@@ -135,10 +135,27 @@ export type CatalogCacheOptions = {
  */
 export const CATALOG_CACHE_TTL_MS_DEFAULT = 60_000;
 
-type CatalogInFlight = {
-  version: number;
-  promise: Promise<CachedCatalog>;
-};
+/** Cold-path wait bound for a coalesced catalog rebuild (#12627). Override with CATALOG_BUILD_TIMEOUT_MS. */
+export const CATALOG_BUILD_TIMEOUT_MS_DEFAULT = 8_000;
+
+function catalogBuildTimeoutMs(): number {
+  const raw = process.env.CATALOG_BUILD_TIMEOUT_MS;
+  if (!raw) return CATALOG_BUILD_TIMEOUT_MS_DEFAULT;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : CATALOG_BUILD_TIMEOUT_MS_DEFAULT;
+}
+
+const catalogLastGood = new Map<string, CachedCatalog>();
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
 
 const catalogCache = new Map<string, CachedCatalog>();
 
@@ -155,10 +172,7 @@ const catalogInFlight = new Map<string, InFlightBuild>();
 
 let _catalogBuilderRuns = 0;
 
-function buildCatalogCacheKey(
-  request: Request,
-  catalogSettings?: { hideAutoCombos?: boolean; hideNoThinkVariants?: boolean }
-): string {
+function buildCatalogCacheKey(request: Request, catalogSettings?: CatalogCacheOptions): string {
   const url = new URL(request.url);
   const prefix = url.searchParams.get("prefix") || "";
   const apiKey = extractApiKey(request) || "";
@@ -229,6 +243,7 @@ function storePayload(
   if (buildGeneration === getModelCatalogCacheVersion()) {
     catalogCache.set(cacheKey, entry);
   }
+  if (entry.status === 200) catalogLastGood.set(cacheKey, entry);
   return entry;
 }
 
@@ -262,7 +277,9 @@ function startBackgroundRefresh(
   const refreshPromise: Promise<CachedCatalog> = new Promise((resolve, reject) => {
     schedule(() =>
       runBuilder(buildPayload, request)
-        .then((payload) => resolve(storePayload(cacheKey, payload, generation)))
+        .then((payload) => {
+          resolve(storePayload(cacheKey, payload, generation));
+        })
         .catch((err) => {
           console.error(
             `[catalog] Background stale-while-revalidate refresh failed for key "${cacheKey}":`,
@@ -292,6 +309,37 @@ function runBuilder(
 ): Promise<CatalogPayload> {
   _catalogBuilderRuns++;
   return buildPayload(request);
+}
+
+async function awaitCatalogInFlight(
+  cacheKey: string,
+  inflight: InFlightBuild,
+  corsHeaders: Record<string, string>,
+  diagnosticHeaders: Record<string, string>
+): Promise<Response> {
+  let payload: CachedCatalog;
+  try {
+    payload = await withTimeout(inflight.promise, catalogBuildTimeoutMs(), "catalog_build_timeout");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (catalogInFlight.get(cacheKey)?.promise === inflight.promise) {
+      catalogInFlight.delete(cacheKey);
+    }
+    const lastGood = catalogLastGood.get(cacheKey);
+    if (msg === "catalog_build_timeout" && lastGood) {
+      return new Response(lastGood.body, {
+        status: lastGood.status,
+        headers: mergeCatalogHeaders(corsHeaders, lastGood.headers, diagnosticHeaders, {
+          "x-omniroute-catalog": "last-good",
+        }),
+      });
+    }
+    throw err;
+  }
+  return new Response(payload.body, {
+    status: payload.status,
+    headers: mergeCatalogHeaders(corsHeaders, payload.headers, diagnosticHeaders),
+  });
 }
 
 /**
@@ -358,11 +406,7 @@ export async function resolveCachedCatalogResponse(
     });
   }
 
-  const payload = await inflight.promise;
-  return new Response(payload.body, {
-    status: payload.status,
-    headers: mergeCatalogHeaders(corsHeaders, payload.headers, diagnosticHeaders),
-  });
+  return awaitCatalogInFlight(cacheKey, inflight, corsHeaders, diagnosticHeaders);
 }
 
 // ── Test hooks ───────────────────────────────────────────────────────────────
@@ -373,6 +417,7 @@ export function __resetCatalogBuilderRunsForTest(): void {
   _catalogBuilderRuns = 0;
   catalogCache.clear();
   catalogInFlight.clear();
+  catalogLastGood.clear();
   lastSeenCatalogCacheVersion = getModelCatalogCacheVersion();
 }
 

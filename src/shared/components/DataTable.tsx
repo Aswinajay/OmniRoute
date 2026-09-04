@@ -81,6 +81,9 @@ export default function DataTable({
   if (loading) {
     return (
       <div
+        role="status"
+        aria-live="polite"
+        aria-busy="true"
         style={{
           display: "flex",
           alignItems: "center",
@@ -90,7 +93,12 @@ export default function DataTable({
           fontSize: "14px",
         }}
       >
-        <span style={{ animation: "spin 1s linear infinite", marginRight: "8px" }}>⏳</span>
+        <span
+          aria-hidden="true"
+          style={{ animation: "spin 1s linear infinite", marginRight: "8px" }}
+        >
+          ⏳
+        </span>
         {t("loading")}
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
@@ -122,13 +130,12 @@ export default function DataTable({
         overflow: "auto",
         maxHeight,
         borderRadius: "8px",
-        // Glass-aware: inside a glass-card this preserves translucency (lens stack);
-        // when rendered card-less the 0.6 alpha still frosts the wallpaper but keeps
-        // zebra/transparent rows legible. Opaque fallback only via prefers-reduced-transparency.
-        background: "var(--glass-bg-subtle)",
+        // Opaque surface so the body grid wallpaper never bleeds through the
+        // transparent even-rows / low-alpha zebra when the table renders card-less.
+        // Liquid-glass lens sits on top via backdrop-filter when supported.
+        background: "var(--color-surface)",
         backdropFilter: "var(--glass-blur-sm)",
         WebkitBackdropFilter: "var(--glass-blur-sm)",
-        border: "1px solid var(--glass-border-subtle)",
       }}
     >
       <table
@@ -149,12 +156,11 @@ export default function DataTable({
                   textAlign: "left",
                   fontWeight: 600,
                   color: "var(--color-text-muted)",
-                  borderBottom: "1px solid var(--glass-border-subtle)",
+                  borderBottom: "1px solid var(--color-border)",
                   position: "sticky",
                   top: 0,
-                  // Lens-correct sticky header: translucent glass-bg-subtle + glass-blur-sm
-                  // pairs with --table-header-bg (0.85 alpha) — never opaque.
-                  background: "var(--glass-bg-subtle)",
+                  // Tokenized header fill plus liquid-glass blur.
+                  background: "var(--table-header-bg)",
                   backdropFilter: "var(--glass-blur-sm)",
                   WebkitBackdropFilter: "var(--glass-blur-sm)",
                   zIndex: 1,
